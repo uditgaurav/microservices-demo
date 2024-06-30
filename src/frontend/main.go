@@ -1,22 +1,10 @@
-// Copyright 2018 Google LLC
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"net/http"
 	"os"
 	"time"
@@ -140,6 +128,13 @@ func main() {
 	mustConnGRPC(ctx, &svc.checkoutSvcConn, svc.checkoutSvcAddr)
 	mustConnGRPC(ctx, &svc.adSvcConn, svc.adSvcAddr)
 
+	// Add this block to disable metadata fetching if environment variable is set
+	if os.Getenv("DISABLE_METADATA_FETCH") == "1" {
+		log.Info("Metadata fetching disabled.")
+	} else {
+		fetchMetadata(log)
+	}
+
 	r := mux.NewRouter()
 	r.HandleFunc("/", svc.homeHandler).Methods(http.MethodGet, http.MethodHead)
 	r.HandleFunc("/product/{id}", svc.productHandler).Methods(http.MethodGet, http.MethodHead)
@@ -164,8 +159,44 @@ func main() {
 	log.Infof("starting server on " + addr + ":" + srvPort)
 	log.Fatal(http.ListenAndServe(addr+":"+srvPort, handler))
 }
+
+func fetchMetadata(log logrus.FieldLogger) {
+	// Use the Fargate metadata endpoint
+	metadata, err := getFargateMetadata("http://169.254.170.2/v3/task")
+	if err != nil {
+		log.Errorf("Failed to fetch metadata: %v", err)
+	} else {
+		log.Infof("Fargate Metadata: %v", metadata)
+	}
+}
+
+func getFargateMetadata(url string) (map[string]interface{}, error) {
+	resp, err := http.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+	}
+
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	var metadata map[string]interface{}
+	err = json.Unmarshal(body, &metadata)
+	if err != nil {
+		return nil, err
+	}
+
+	return metadata, nil
+}
+
 func initStats(log logrus.FieldLogger) {
-	// TODO(arbrown) Implement OpenTelemtry stats
+	// TODO: Implement OpenTelemetry stats
 }
 
 func initTracing(log logrus.FieldLogger, ctx context.Context, svc *frontendServer) (*sdktrace.TracerProvider, error) {
@@ -186,8 +217,7 @@ func initTracing(log logrus.FieldLogger, ctx context.Context, svc *frontendServe
 }
 
 func initProfiling(log logrus.FieldLogger, service, version string) {
-	// TODO(ahmetb) this method is duplicated in other microservices using Go
-	// since they are not sharing packages.
+	// TODO: Implement profiler initialization
 	for i := 1; i <= 3; i++ {
 		log = log.WithField("retry", i)
 		if err := profiler.Start(profiler.Config{
@@ -198,14 +228,14 @@ func initProfiling(log logrus.FieldLogger, service, version string) {
 		}); err != nil {
 			log.Warnf("warn: failed to start profiler: %+v", err)
 		} else {
-			log.Info("started Stackdriver profiler")
+			log.Info("started profiler")
 			return
 		}
 		d := time.Second * 10 * time.Duration(i)
-		log.Debugf("sleeping %v to retry initializing Stackdriver profiler", d)
+		log.Debugf("sleeping %v to retry initializing profiler", d)
 		time.Sleep(d)
 	}
-	log.Warn("warning: could not initialize Stackdriver profiler after retrying, giving up")
+	log.Warn("warning: could not initialize profiler after retrying, giving up")
 }
 
 func mustMapEnv(target *string, envKey string) {
